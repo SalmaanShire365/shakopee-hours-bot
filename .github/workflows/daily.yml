@@ -34,7 +34,7 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
-
+      - run: git log -1 --oneline && sed -n '44,72p' tests/test_scraper.py
       - name: Run tests
         run: python -m unittest discover -s tests -v
 
