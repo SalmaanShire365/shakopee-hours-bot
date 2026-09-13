@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+        #!/usr/bin/env python3
 """Shakopee Community Center daily-hours Discord bot.
 
 Fetches the official Community Center page, determines today's hours with
@@ -78,6 +78,13 @@ MONTH_RE = (
     r"Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?"
 )
 
+# Any weekday name. Used to match a single day or an arbitrary day range, so the
+# parser does not break every time the City regroups the weekdays on the page.
+DAY_ALT = r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday"
+
+# A clock time with optional minutes: "5 a.m.", "5:00 A.M.", "12:30pm".
+TIME_RE = re.compile(r"(?i)\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?")
+
 
 @dataclass(frozen=True)
 class HoursResult:
@@ -115,6 +122,22 @@ def html_to_text(html: str) -> str:
 
 
 def normalize_time_text(value: str) -> str:
+    """Canonicalize an hours string to "H:MM AM – H:MM PM".
+
+    The City currently publishes the same hours twice on the page in two
+    different formats ("5 a.m. to 9 p.m." in the contact card, and
+    "5:00 A.M.- 9:00 P.M." in the news section). Canonicalizing both to an
+    identical string keeps `comparison_key` stable, so a page reshuffle cannot
+    masquerade as an hours change under SEND_MODE=changes_only.
+    """
+    times = TIME_RE.findall(value)
+    if len(times) == 2:
+        return " – ".join(
+            f"{int(hour)}:{minute or '00'} {meridiem.upper()}M"
+            for hour, minute, meridiem in times
+        )
+
+    # Fallback for anything that is not a clean two-time range.
     value = value.replace("–", "-").replace("—", "-")
     value = re.sub(r"\s+", " ", value.strip())
     value = re.sub(r"(?i)\s*a\.?\s*m\.?", " AM", value)
@@ -139,24 +162,48 @@ def expand_day_expression(expr: str) -> list[str]:
 
 
 def parse_normal_schedule(text: str) -> dict[str, str]:
+    """Parse the normal weekly schedule.
+
+    Accepts a single day or any two-day range, so all of these work:
+        Monday-Friday: 5 a.m. to 9 p.m.
+        Monday - Thursday: 5:00 A.M.- 8:00 P.M.
+        Saturday: 6 a.m. to 8 p.m.
+        Sunday: CLOSED
+    """
     schedule: dict[str, str] = {}
-    # Supports examples such as:
-    # Monday-Thursday: 5 a.m. to 8 p.m.
-    # Friday: 5 a.m. to 7 p.m.
+    conflicts: list[str] = []
+
     pattern = re.compile(
-        r"(?im)^\s*"
-        r"(Monday(?:\s*[-–—]\s*Thursday)?|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
-        r"\s*:\s*"
-        r"([^\n]+)$"
+        rf"(?im)^\s*"
+        rf"({DAY_ALT})(?:\s*[-–—]\s*({DAY_ALT}))?"
+        rf"\s*:\s*"
+        rf"([^\n]+)$"
     )
+
     for match in pattern.finditer(text):
-        day_expr = match.group(1)
-        hours_raw = match.group(2).strip()
+        start_day, end_day, hours_raw = (
+            match.group(1),
+            match.group(2),
+            match.group(3).strip(),
+        )
         if not re.search(r"(?i)(a\.?m\.?|p\.?m\.?|closed)", hours_raw):
             continue
+
         hours = "CLOSED" if "closed" in hours_raw.lower() else normalize_time_text(hours_raw)
+        day_expr = f"{start_day}-{end_day}" if end_day else start_day
+
         for day in expand_day_expression(day_expr):
+            if day in schedule and schedule[day] != hours:
+                conflicts.append(f"{day}: {schedule[day]!r} vs {hours!r}")
             schedule[day] = hours
+
+    # Two blocks on the page disagreeing means the hours genuinely cannot be
+    # verified. Fail rather than letting whichever appears last silently win.
+    if conflicts:
+        raise RuntimeError(
+            "Conflicting normal-hours blocks on the page: "
+            + "; ".join(sorted(set(conflicts)))
+        )
 
     if len(schedule) < 7:
         missing = sorted(set(DAY_NAMES) - set(schedule))
@@ -295,7 +342,8 @@ def changed_since_previous(previous: Optional[HoursResult], current: HoursResult
 
 def build_embed(result: HoursResult, changed: bool) -> dict:
     """Build a Discord webhook payload with an embed describing today's hours."""
-    d = datetime.fromisoformat(result.local_date).strftime("%A, %B %-d")
+    parsed_date = datetime.fromisoformat(result.local_date)
+    d = f"{parsed_date.strftime('%A, %B')} {parsed_date.day}"
 
     if result.status == "closed":
         color = COLOR_CLOSED
