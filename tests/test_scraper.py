@@ -45,9 +45,9 @@ class ScraperTests(unittest.TestCase):
             "Saturday: 6 a.m. to 7 p.m.\n"
             "Sunday: 8 a.m. to 6 p.m."
         )
-        self.assertEqual(schedule["monday"], "5 AM – 8 PM")
-        self.assertEqual(schedule["thursday"], "5 AM – 8 PM")
-        self.assertEqual(schedule["sunday"], "8 AM – 6 PM")
+        self.assertEqual(schedule["monday"], "5:00 AM – 8:00 PM")
+        self.assertEqual(schedule["thursday"], "5:00 AM – 8:00 PM")
+        self.assertEqual(schedule["sunday"], "8:00 AM – 6:00 PM")
 
     def test_modified_hours_override_normal_hours(self):
         now = datetime(2026, 9, 6, 6, 0, tzinfo=TZ)
@@ -66,7 +66,7 @@ class ScraperTests(unittest.TestCase):
         now = datetime(2026, 9, 8, 6, 0, tzinfo=TZ)
         result = determine_hours(FIXTURE, now)
         self.assertEqual(result.status, "normal")
-        self.assertEqual(result.hours, "5 AM – 8 PM")
+        self.assertEqual(result.hours, "5:00 AM – 8:00 PM") 
 
     def test_dated_maintenance_closure(self):
         now = datetime(2026, 8, 25, 6, 0, tzinfo=TZ)
@@ -132,6 +132,24 @@ class DiscordEmbedTests(unittest.TestCase):
         embed = payload["embeds"][0]
         self.assertIn("could not verify", embed["title"].lower())
 
+def test_both_page_formats_normalize_identically(self):
+    a = scraper.parse_normal_schedule(
+        "Monday-Friday: 5 a.m. to 9 p.m.\n"
+        "Saturday: 6 a.m. to 8 p.m.\nSunday: 8 a.m. to 8 p.m."
+    )
+    b = scraper.parse_normal_schedule(
+        "Monday-Friday: 5:00 A.M.- 9:00 P.M.\n"
+        "Saturday: 6:00 A.M.- 8:00 P.M.\nSunday: 8:00 A.M.-8:00 P.M."
+    )
+    self.assertEqual(a, b)
+
+def test_conflicting_blocks_fail_closed(self):
+    with self.assertRaises(RuntimeError):
+        scraper.parse_normal_schedule(
+            "Monday-Friday: 5 a.m. to 9 p.m.\n"
+            "Saturday: 6 a.m. to 8 p.m.\nSunday: 8 a.m. to 8 p.m.\n"
+            "Monday-Friday: 5 a.m. to 7 p.m."
+        )
 
 class SendDiscordWebhookTests(unittest.TestCase):
     def test_raises_without_webhook_url(self):
